@@ -18,7 +18,7 @@ Usage:
   python3 falcon_package_cve.py -o packages.csv
 
   # Every package affected by a specific CVE
-  python3 falcon_package_cve.py --cve CVE-2024-1234 -o cve-impact.csv
+  python3 falcon_package_cve.py --cve CVE-2024-1234 -o cve-packages.csv
 
   # Packages with any Critical severity CVE
   python3 falcon_package_cve.py --severity Critical -o critical.csv
@@ -37,39 +37,43 @@ import sys
 import csv
 import argparse
 
-from auth import get_oauth_token
+from auth import get_auth
 
 try:
-    import requests
+    from falconpy import ContainerPackages
 except ImportError:
     print("Install dependencies: pip install -r requirements.txt", file=sys.stderr)
     sys.exit(1)
 
 
-# ── API: Packages v2 ──────────────────────────────────────────────────────────
+# ── API helpers ───────────────────────────────────────────────────────────────
 
-def fetch_packages_page(token, base_url, fql_filter, offset, limit):
-    url = f"{base_url}/container-security/combined/packages/v2"
+def fetch_packages_page(client, fql_filter, offset, limit):
     params = {"limit": limit, "offset": offset}
     if fql_filter:
         params["filter"] = fql_filter
-    resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, params=params, timeout=30)
-    if resp.status_code != 200:
-        print(f"  API error {resp.status_code}: {resp.text[:400]}", file=sys.stderr)
+
+    resp = client.read_packages(**params)
+
+    if resp["status_code"] != 200:
+        errors = resp.get("body", {}).get("errors") or []
+        msg = "; ".join(e.get("message", str(e)) for e in errors) or str(resp["status_code"])
+        print(f"  API error: {msg}", file=sys.stderr)
         return [], 0
-    body = resp.json()
+
+    body = resp["body"]
     resources = body.get("resources") or []
     total = body.get("meta", {}).get("pagination", {}).get("total", len(resources))
     return resources, total
 
 
-def fetch_all_packages(token, base_url, fql_filter, max_records=5000):
+def fetch_all_packages(client, fql_filter, max_records=5000):
     page_size = min(500, max_records)
     all_pkgs, offset = [], 0
     total = None
     while True:
         this_limit = min(page_size, max_records - len(all_pkgs))
-        batch, total = fetch_packages_page(token, base_url, fql_filter, offset, this_limit)
+        batch, total = fetch_packages_page(client, fql_filter, offset, this_limit)
         if not batch:
             break
         all_pkgs.extend(batch)
@@ -141,7 +145,8 @@ def main():
     args = parser.parse_args()
 
     print("=== Falcon Package CVE Report ===", file=sys.stderr)
-    token, base_url = get_oauth_token()
+    auth = get_auth()
+    client = ContainerPackages(auth_object=auth)
     print("✓ Authenticated", file=sys.stderr)
 
     fql = build_fql(args)
@@ -152,7 +157,7 @@ def main():
             print(f"  Use --exact-severity to restrict rows to {args.severity} only", file=sys.stderr)
 
     print("Fetching package CVE records...", file=sys.stderr)
-    records, total = fetch_all_packages(token, base_url, fql, max_records=args.limit)
+    records, total = fetch_all_packages(client, fql, max_records=args.limit)
     if total and len(records) < total:
         print(f"⚠  Fetched {len(records)} of {total} total (increase --limit to get all)", file=sys.stderr)
     print(f"✓ {len(records)} records retrieved", file=sys.stderr)
